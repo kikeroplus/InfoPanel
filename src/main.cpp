@@ -16,7 +16,7 @@
 #define TFT_RST  8
 #define TFT_BL   7
 
-#define TFT_ROTATION 1 // 横置き 320x240。上下が逆なら 3
+#define TFT_ROTATION 3 // 横置き 320x240。上下が逆なら 1
 
 // ---- MQTT (仕様は WorkingTimer の MQTT_TOPICS.md が唯一の正) ----
 #define MQTT_HOST      "192.168.11.32"
