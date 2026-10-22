@@ -22,6 +22,8 @@
 // ---- スイッチ (片側 GND、押すと LOW) とパッシブブザー (PWM で鳴らす) ----
 #define SW1_PIN    13
 #define SW2_PIN    14
+#define SW3_PIN    1 // SW3・SW4 は将来の拡張用 (まだ役割なし)
+#define SW4_PIN    2
 #define BUZZER_PIN 6
 
 // バックライトの PWM。tone() は LEDC チャンネル 0 (タイマー 0) を使うので、別のタイマーになる 4 を使う
@@ -250,7 +252,7 @@ struct Button
   bool down, raw, longFired;
   uint32_t changedAt, downAt;
 };
-Button sw1 = {SW1_PIN}, sw2 = {SW2_PIN};
+Button sw1 = {SW1_PIN}, sw2 = {SW2_PIN}, sw3 = {SW3_PIN}, sw4 = {SW4_PIN};
 
 BtnEv buttonUpdate(Button &b)
 {
@@ -1261,6 +1263,13 @@ void drawDevice()
     text(170, 144 + r * 12, 1, C_CYAN, help[r][0]);
     textR(306, 144 + r * 12, 1, C_TEXT, help[r][1]);
   }
+  // 押している間だけ光る (配線の確認用)
+  const Button *sws[] = {&sw1, &sw2, &sw3, &sw4};
+  for (int k = 0; k < 4; k++)
+  {
+    char name[4] = {'S', 'W', (char)('1' + k), 0};
+    text(170 + k * 34, 192, 1, sws[k]->down ? C_GREEN : C_DIM, name);
+  }
   text(170, 204, 1, C_DIM, "LIGHT");
   textR(306, 204, 1, C_TEXT, BL_NAMES[blLevel]);
   text(170, 216, 1, C_DIM, "SOUND");
@@ -1341,13 +1350,13 @@ void renderFrame()
 // ---- スイッチの操作 ----
 void handleButtons()
 {
-  BtnEv e1 = buttonUpdate(sw1), e2 = buttonUpdate(sw2);
-  if (e1 == EV_NONE && e2 == EV_NONE)
+  BtnEv e1 = buttonUpdate(sw1), e2 = buttonUpdate(sw2), e3 = buttonUpdate(sw3), e4 = buttonUpdate(sw4);
+  if (e1 == EV_NONE && e2 == EV_NONE && e3 == EV_NONE && e4 == EV_NONE)
     return;
-  // アラート中はどちらかを押すと閉じるだけ
+  // アラート中はどれかを押すと閉じるだけ
   if (alert.active)
   {
-    if (e1 == EV_SHORT || e2 == EV_SHORT)
+    if (e1 == EV_SHORT || e2 == EV_SHORT || e3 == EV_SHORT || e4 == EV_SHORT)
     {
       alert.active = false;
       PLAY(SND_CLICK);
@@ -1382,6 +1391,17 @@ void handleButtons()
     else
       PLAY(SND_MUTE);
   }
+  // SW3・SW4 はまだ役割がないので、押されたことだけ知らせる
+  BtnEv ex[] = {e3, e4};
+  for (int k = 0; k < 2; k++)
+    if (ex[k] != EV_NONE)
+    {
+      char msg[32];
+      snprintf(msg, sizeof(msg), "SW%d %s (NOT ASSIGNED)", 3 + k, ex[k] == EV_LONG ? "HOLD" : "PRESS");
+      Serial.printf("sw%d: %s\n", 3 + k, ex[k] == EV_LONG ? "hold" : "press");
+      toast(C_DIM, msg);
+      PLAY(SND_CLICK);
+    }
 }
 
 // 1 秒ごと: 今日の稼働時間を足す、日付が変わったら今日の成績を消す、1 分ごとの受信数
@@ -1435,6 +1455,8 @@ void setup()
 
   pinMode(SW1_PIN, INPUT_PULLUP);
   pinMode(SW2_PIN, INPUT_PULLUP);
+  pinMode(SW3_PIN, INPUT_PULLUP);
+  pinMode(SW4_PIN, INPUT_PULLUP);
 
   for (PcInfo &pc : pcs)
     pcReset(pc);
