@@ -71,6 +71,7 @@ uint32_t mix(uint32_t a, uint32_t b, float t)
 struct PcInfo
 {
   const char *name;
+  const char *nick; // 利用者が付けた愛称 (名前の横に控えめに出す)
   uint32_t rgb;     // グラフやレーダーでこの PC を表す色
   const char *hw;   // CPU / GPU の短い名前
   const char *ip;
@@ -91,9 +92,9 @@ struct PcInfo
   uint32_t runMs;   // 今日 run だった時間
 };
 PcInfo pcs[] = {
-    {"PC1", 0x00D0FF, "ULTRA5 / 5060TI", "192.168.11.31"},
-    {"PC2", 0xFF4FD8, "ULTRA7 / 5060TI", "192.168.11.30"},
-    {"PC3", 0xFFB020, "13400 / 5060", "192.168.11.14"},
+    {"PC1", "CONDOR", 0x00D0FF, "ULTRA5 / 5060TI", "192.168.11.31"},
+    {"PC2", "FALCON", 0xFF4FD8, "ULTRA7 / 5060TI", "192.168.11.30"},
+    {"PC3", "KIWI", 0xFFB020, "13400 / 5060", "192.168.11.14"},
 };
 const int PC_N = sizeof(pcs) / sizeof(pcs[0]);
 
@@ -626,6 +627,9 @@ void segBar(int x, int y, int w, int h, float pct, uint32_t rgb)
 }
 
 // 負荷・温度の色: warn 以上で黄、crit 以上で赤
+// 愛称の色: その PC の色を灰色に寄せて控えめにする
+uint32_t nickRGB(const PcInfo &pc) { return mix(pc.rgb, C_DIM, 0.6f); }
+
 uint32_t levelRGB(int v, int warn, int crit, uint32_t normal = C_CYAN)
 {
   if (v < 0)
@@ -772,10 +776,11 @@ void drawOverview()
     int x = 6 + i * 104, y = 98, w = 100, h = 102;
     frame(x, y, w, h, nullptr, pc.rgb);
     text(x + 6, y + 6, 2, pc.rgb, pc.name);
+    text(x + 44, y + 13, 1, nickRGB(pc), pc.nick);
     uint32_t sc = statusRGB(pc.status);
     cv->fillCircle(x + w - 12, y + 13, 4, c565(sc));
     if (!strcmp(pc.status, "online"))
-      cv->drawCircle(x + w - 12, y + 13, 6 + (millis() / 150) % 4, c565(mix(C_PANEL, sc, 0.5f)));
+      cv->drawCircle(x + w - 12, y + 13, 5 + (millis() / 150) % 4, c565(mix(C_PANEL, sc, 0.5f)));
 
     // ComfyUI の状態と進み具合
     char up[10];
@@ -869,6 +874,7 @@ void drawSystems()
     int x = 6, y = 28 + i * 70, w = 308, h = 66;
     frame(x, y, w, h, nullptr, pc.rgb);
     text(x + 8, y + 6, 2, pc.rgb, pc.name);
+    text(x + 46, y + 13, 1, nickRGB(pc), pc.nick);
     char up[10];
     upper(up, pc.status[0] ? pc.status : "--", sizeof(up));
     text(x + 8, y + 26, 1, statusRGB(pc.status), up);
@@ -927,18 +933,21 @@ void drawRender()
     uint32_t sc = statusRGB(pc.comfy);
     frame(x, y, w, h, nullptr, pc.comfy[0] ? sc : C_LINE);
     text(x + 8, y + 6, 2, pc.rgb, pc.name);
+    text(x + 46, y + 13, 1, nickRGB(pc), pc.nick);
 
     // 状態の札 (塗りつぶしに暗い文字)
     char up[10];
     upper(up, pc.comfy[0] ? pc.comfy : "no data", sizeof(up));
     int bw = textW(1, up) + 8;
-    cv->fillRect(x + 52, y + 6, bw, 12, c565(sc));
-    text(x + 56, y + 8, 1, C_BG, up);
+    const int bx = x + 90;
+    cv->fillRect(bx, y + 6, bw, 12, c565(sc));
+    text(bx + 4, y + 8, 1, C_BG, up);
     // 実行中・エラーのノード名
     if (pc.node[0] && (isRun(pc) || !strcmp(pc.comfy, "error") || !strcmp(pc.comfy, "stalled")))
     {
-      snprintf(buf, sizeof(buf), "%.24s", pc.node);
-      text(x + 52 + bw + 6, y + 8, 1, C_DIM, buf);
+      int nx = bx + bw + 6, room = (x + w - 8 - 30 - nx) / 6; // 右端の Q の分を空ける
+      snprintf(buf, sizeof(buf), "%.*s", constrain(room, 0, 24), pc.node);
+      text(nx, y + 8, 1, C_DIM, buf);
     }
     if (pc.q >= 0)
     {
@@ -1131,6 +1140,7 @@ void drawScope()
     PcInfo &pc = pcs[i];
     int y = 42 + i * 44;
     text(x + 8, y, 1, pc.rgb, pc.name);
+    textR(x + 80, y, 1, nickRGB(pc), pc.nick);
     bool f = sysFresh(pc) && pc.gpu >= 0;
     if (f)
     {
