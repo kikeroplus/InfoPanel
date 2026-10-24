@@ -26,7 +26,8 @@
 #define SW4_PIN    2
 #define BUZZER_PIN 6
 
-// バックライトの PWM。tone() は LEDC チャンネル 0 (タイマー 0) を使うので、別のタイマーになる 4 を使う
+// ブザーとバックライトの PWM。ブザーは LEDC チャンネル 0 (タイマー 0)、バックライトは別のタイマーになる 4
+#define BZ_CH 0
 #define BL_CH 4
 
 // ---- MQTT (仕様は WorkingTimer の MQTT_TOPICS.md が唯一の正) ----
@@ -92,9 +93,9 @@ struct PcInfo
   uint32_t runMs;   // 今日 run だった時間
 };
 PcInfo pcs[] = {
-    {"PC1", "CONDOR", 0x00D0FF, "ULTRA5 / 5060TI", "192.168.11.31"},
-    {"PC2", "FALCON", 0xFF4FD8, "ULTRA7 / 5060TI", "192.168.11.30"},
-    {"PC3", "KIWI", 0xFFB020, "13400 / 5060", "192.168.11.14"},
+    {"PC1", "CONDOR", 0x00D0FF, "ULTRA5 / 5060TI", "192.168.55.4"},
+    {"PC2", "FALCON", 0xFF4FD8, "ULTRA7 / 5060TI", "192.168.55.2"},
+    {"PC3", "KIWI", 0xFFB020, "13400 / 5060", "192.168.55.3"},
 };
 const int PC_N = sizeof(pcs) / sizeof(pcs[0]);
 
@@ -200,10 +201,16 @@ const Note SND_BOOT[] = {{1047, 60}, {1568, 60}, {2093, 100}};
 const Note SND_DONE[] = {{1568, 90}, {0, 30}, {2093, 160}};
 const Note SND_ALERT[] = {{2600, 150}, {0, 80}, {2600, 150}, {0, 80}, {2600, 150}};
 const Note SND_CALL[] = {{1760, 220}, {1397, 380}};
-const Note SND_MUTE[] = {{1200, 40}, {0, 30}, {800, 60}};
+const Note SND_VOL[] = {{1200, 40}, {0, 30}, {800, 60}};
 #define PLAY(s) play(s, sizeof(s) / sizeof(s[0]))
 
-bool muted = false;
+// 音量はデューティ比 (10 ビット、512 が 50% で最大) で変える。OFF は鳴らさない
+const uint16_t VOL_DUTY[] = {512, 80, 20, 0};
+const char *VOL_NAMES[] = {"HIGH", "MID", "LOW", "OFF"};
+#define VOL_OFF 3
+int volLevel = 0;
+bool muted() { return volLevel == VOL_OFF; }
+
 const Note *seq = nullptr;
 int seqN = 0, seqI = 0;
 uint32_t seqAt = 0;
@@ -211,15 +218,18 @@ uint32_t seqAt = 0;
 void startNote()
 {
   if (seq[seqI].freq)
-    tone(BUZZER_PIN, seq[seqI].freq);
+  {
+    ledcWriteTone(BZ_CH, seq[seqI].freq);
+    ledcWrite(BZ_CH, VOL_DUTY[volLevel]);
+  }
   else
-    noTone(BUZZER_PIN);
+    ledcWrite(BZ_CH, 0);
   seqAt = millis();
 }
 
 void play(const Note *s, int n, bool force = false)
 {
-  if (muted && !force)
+  if (muted() && !force)
     return;
   seq = s;
   seqN = n;
@@ -235,7 +245,7 @@ void soundUpdate()
     startNote();
   else
   {
-    noTone(BUZZER_PIN);
+    ledcWrite(BZ_CH, 0);
     seq = nullptr;
   }
 }
@@ -720,7 +730,7 @@ void drawHeader()
   bool wifiOk = WiFi.status() == WL_CONNECTED;
   uint32_t link = wifiOk && mqtt.connected() ? C_GREEN : wifiOk ? C_YELLOW : C_RED;
   cv->fillRect(238, 8, 5, 5, c565(link));
-  if (muted)
+  if (muted())
     text(248, 7, 1, C_RED, "MUTE");
   nowHHMM(buf);
   textR(314, 7, 1, C_TEXT, buf);
@@ -1266,7 +1276,7 @@ void drawDevice()
       {"SW1", "NEXT PAGE"},
       {"SW2", "PREV PAGE"},
       {"SW1 HOLD", "BRIGHTNESS"},
-      {"SW2 HOLD", "SOUND ON/OFF"},
+      {"SW2 HOLD", "VOLUME"},
   };
   for (int r = 0; r < 4; r++)
   {
@@ -1283,7 +1293,7 @@ void drawDevice()
   text(170, 204, 1, C_DIM, "LIGHT");
   textR(306, 204, 1, C_TEXT, BL_NAMES[blLevel]);
   text(170, 216, 1, C_DIM, "SOUND");
-  textR(306, 216, 1, muted ? C_RED : C_GREEN, muted ? "MUTED" : "ON");
+  textR(306, 216, 1, muted() ? C_RED : C_GREEN, VOL_NAMES[volLevel]);
 }
 
 // アラートを画面中央に重ねる。枠が点滅する
@@ -1394,12 +1404,15 @@ void handleButtons()
   }
   if (e2 == EV_LONG)
   {
-    muted = !muted;
-    toast(muted ? C_RED : C_GREEN, muted ? "SOUND OFF" : "SOUND ON");
-    if (muted)
-      noTone(BUZZER_PIN);
+    volLevel = (volLevel + 1) % (sizeof(VOL_DUTY) / sizeof(VOL_DUTY[0]));
+    toast(muted() ? C_RED : C_GREEN, (String("SOUND ") + VOL_NAMES[volLevel]).c_str());
+    if (muted())
+    {
+      ledcWrite(BZ_CH, 0);
+      seq = nullptr;
+    }
     else
-      PLAY(SND_MUTE);
+      PLAY(SND_VOL); // 新しい音量で試し鳴らし
   }
   // SW3・SW4 はまだ役割がないので、押されたことだけ知らせる
   BtnEv ex[] = {e3, e4};
@@ -1457,6 +1470,9 @@ void setup()
   delay(200);
   Serial.printf("psram: %s, size %u\n", psramFound() ? "found" : "NOT FOUND", ESP.getPsramSize());
 
+  ledcSetup(BZ_CH, 2000, 10);
+  ledcAttachPin(BUZZER_PIN, BZ_CH);
+  ledcWrite(BZ_CH, 0);
   ledcSetup(BL_CH, 5000, 8);
   ledcAttachPin(TFT_BL, BL_CH);
   applyBacklight();
