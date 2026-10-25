@@ -71,9 +71,20 @@ ESP32-S3 と 240x320 の液晶で作る情報表示端末。WorkingTimer とは�
 
 - 基板の USB 端子は 2 つある。書き込みとシリアルモニタは「COM」(UART) 側を使う。
 - COM 番号が決まったら `platformio.ini` の `upload_port` を書く。
-- WiFi の設定は `include/secrets.h` (`secrets.example.h` をコピーして記入、`.gitignore` 済み)。
+
+## WiFi の設定
+
+SSID とパスワードはファームウェアに書かず、起動時の設定ポータル (WiFiManager) で決める。仕組みは WorkingTimer と同じで、`include/WiFiSetup.h` は WorkingTimer と同じファイル (直すときは両方を揃える)。
+
+1. 保存済みの WiFi につながらないと (書き込み直後など)、画面が「WIFI SETUP MODE」になり、AP `InfoPanel-XXXX` (MAC の末尾 4 桁) が立つ。
+2. スマホでその AP につなぎ、設定ページ (開かなければ `192.168.4.1`) で SSID・パスワードを選んで保存する。同じページで「Device name」(任意) と「MQTT server」(初期値 `192.168.11.32`、空欄なら MQTT を使わない) も変えられる。
+3. 保存すると再起動なしでつながり、いつもの画面になる。次からは自動でつながる。
+4. 別の WiFi に変えたいときは **SW1 を押しながら起動 (リセット)** すると、保存済みの WiFi を消して設定モードになる。
+5. 3 分たっても設定しなければ設定モードを終えてオフラインで動く (保存済みの WiFi があれば 30 秒ごとにつなぎ直す)。
+
+ESP32 は 2.4GHz にしかつながらない。設定ページの一覧に 5GHz の SSID が出ないのは正常。
 
 ## MQTT
 
 トピックの仕様は WorkingTimer の `MQTT_TOPICS.md` が唯一の正。新しいトピックもそこに書き足す。
-クライアント ID は `infopanel-XXXX` (MAC の末尾 4 桁)。
+クライアント ID は `InfoPanel-XXXX` (MAC の末尾 4 桁。設定ポータルの AP 名・ホスト名と同じ)。ブローカーは設定ページの「MQTT server」欄で決める。
