@@ -6,28 +6,10 @@
 #include <time.h>
 #include <stdarg.h>
 #include "WiFiSetup.h"
+#include "board.h" // ピン・液晶・音の機種ごとの違い
+#include "sound.h"
 
-// ---- 液晶 (ST7789 240x320、TFT-VUMeterTester-240-320 で動作確認した設定を S3 のピンに置き換え) ----
-// GND = GND, VCC = 3.3V, SDO(MISO) は未接続。S3 の SPI2 (FSPI) の標準ピンに合わせてある
-#define TFT_SCK  12 // SCL
-#define TFT_MOSI 11 // SDA
-#define TFT_MISO -1
-#define TFT_CS   10
-#define TFT_DC   9
-#define TFT_RST  8
-#define TFT_BL   7
-
-#define TFT_ROTATION 3 // 横置き 320x240。上下が逆なら 1
-
-// ---- スイッチ (片側 GND、押すと LOW) とパッシブブザー (PWM で鳴らす) ----
-#define SW1_PIN    13
-#define SW2_PIN    14
-#define SW3_PIN    1 // SW3・SW4 は将来の拡張用 (まだ役割なし)
-#define SW4_PIN    2
-#define BUZZER_PIN 6
-
-// ブザーとバックライトの PWM。ブザーは LEDC チャンネル 0 (タイマー 0)、バックライトは別のタイマーになる 4
-#define BZ_CH 0
+// バックライトの PWM。ブザー (LEDC チャンネル 0、タイマー 0) とは別のタイマーになる 4
 #define BL_CH 4
 
 // ---- WiFi (起動時に WiFiManager の設定ポータルで設定する。WiFiSetup.h は WorkingTimer と同じファイル) ----
@@ -42,7 +24,7 @@
 #define SCREEN_H 240
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCK, TFT_MOSI, TFT_MISO);
-Arduino_GFX *panel = new Arduino_ST7789(bus, TFT_RST, TFT_ROTATION, false /* IPS: 色反転していたため false */, 240, 320);
+Arduino_GFX *panel = new Arduino_ST7789(bus, TFT_RST, TFT_ROTATION, TFT_IPS, 240, 320);
 // 画面全体のキャンバス (320x240x2 = 150KB、PSRAM に取る) に描いてから一度に送る
 Arduino_Canvas *cv = new Arduino_Canvas(SCREEN_W, SCREEN_H, panel);
 
@@ -198,64 +180,10 @@ void addEvent(int pc, uint32_t rgb, const char *fmt, ...)
   Serial.printf("event: %s %s\n", pc >= 0 ? pcs[pc].name : "-", e.msg);
 }
 
-// ---- ブザー: 音の並びを loop() の中で順に鳴らす (待たない) ----
-struct Note
-{
-  uint16_t freq, ms; // freq 0 は休み
-};
-const Note SND_CLICK[] = {{3200, 12}};
-const Note SND_BOOT[] = {{1047, 60}, {1568, 60}, {2093, 100}};
-const Note SND_DONE[] = {{1568, 90}, {0, 30}, {2093, 160}};
-const Note SND_ALERT[] = {{2600, 150}, {0, 80}, {2600, 150}, {0, 80}, {2600, 150}};
-const Note SND_CALL[] = {{1760, 220}, {1397, 380}};
-const Note SND_VOL[] = {{1200, 40}, {0, 30}, {800, 60}};
-#define PLAY(s) play(s, sizeof(s) / sizeof(s[0]))
-
-// 音量はデューティ比 (10 ビット、512 が 50% で最大) で変える。OFF は鳴らさない
-const uint16_t VOL_DUTY[] = {512, 80, 20, 0};
-const char *VOL_NAMES[] = {"HIGH", "MID", "LOW", "OFF"};
-#define VOL_OFF 3
-int volLevel = 0;
+// ---- 音量 (鳴らし方は sound_buzzer.cpp / sound_speaker.cpp) ----
+const char *VOL_NAMES[VOL_N] = {"HIGH", "MID", "LOW", "OFF"};
+int volLevel = VOL_LOW; // 起動したときは LOW
 bool muted() { return volLevel == VOL_OFF; }
-
-const Note *seq = nullptr;
-int seqN = 0, seqI = 0;
-uint32_t seqAt = 0;
-
-void startNote()
-{
-  if (seq[seqI].freq)
-  {
-    ledcWriteTone(BZ_CH, seq[seqI].freq);
-    ledcWrite(BZ_CH, VOL_DUTY[volLevel]);
-  }
-  else
-    ledcWrite(BZ_CH, 0);
-  seqAt = millis();
-}
-
-void play(const Note *s, int n, bool force = false)
-{
-  if (muted() && !force)
-    return;
-  seq = s;
-  seqN = n;
-  seqI = 0;
-  startNote();
-}
-
-void soundUpdate()
-{
-  if (!seq || millis() - seqAt < seq[seqI].ms)
-    return;
-  if (++seqI < seqN)
-    startNote();
-  else
-  {
-    ledcWrite(BZ_CH, 0);
-    seq = nullptr;
-  }
-}
 
 // ---- スイッチ: 同じ状態が 25ms 続いたら確定 (チャタリング除去)。0.7 秒押し続けると長押し ----
 enum BtnEv
@@ -266,14 +194,17 @@ enum BtnEv
 };
 struct Button
 {
-  uint8_t pin;
+  int8_t pin; // -1 はその機種にないスイッチ
   bool down, raw, longFired;
   uint32_t changedAt, downAt;
 };
 Button sw1 = {SW1_PIN}, sw2 = {SW2_PIN}, sw3 = {SW3_PIN}, sw4 = {SW4_PIN};
+Button *const SWS[] = {&sw1, &sw2, &sw3, &sw4};
 
 BtnEv buttonUpdate(Button &b)
 {
+  if (b.pin < 0)
+    return EV_NONE;
   uint32_t now = millis();
   bool raw = digitalRead(b.pin) == LOW;
   if (raw != b.raw)
@@ -300,11 +231,16 @@ BtnEv buttonUpdate(Button &b)
   return EV_NONE;
 }
 
-// ---- バックライト ----
+// ---- バックライト (BL 端子のない液晶では変えられない) ----
 const uint8_t BL_LEVELS[] = {255, 90, 20};
 const char *BL_NAMES[] = {"HIGH", "MID", "LOW"};
 int blLevel = 0;
-void applyBacklight() { ledcWrite(BL_CH, BL_LEVELS[blLevel]); }
+void applyBacklight()
+{
+#if TFT_BL >= 0
+  ledcWrite(BL_CH, BL_LEVELS[blLevel]);
+#endif
+}
 
 // ---- アラート (画面中央に重ねて出す。新しいものが来たら置き換え、古いものは出来事の記録に残る) ----
 enum AlertKind
@@ -321,7 +257,20 @@ struct Alert
   uint32_t rgb;
   char title[24], detail[44], at[6];
   uint32_t shownAt;
+  uint32_t rangAt; // 呼び出し音を最後に鳴らした millis
+  bool offPending; // 呼び出しの OFF が来た (CALL_HOLD_MS たったら閉じる)
 } alert;
+
+// 呼び出しは ON と OFF の間が短いので、ON から 20 秒は CALL を出し続け、その間 5 秒ごとに鳴らす
+#define CALL_HOLD_MS   20000
+#define CALL_REPEAT_MS 5000
+
+void ringCall()
+{
+  alert.rangAt = millis();
+  soundPlay(SND_CALL);
+  soundSay("よびだされました。"); // スピーカーの機体だけ。チャイムのあとにしゃべる
+}
 
 void raiseAlert(int pc, AlertKind kind, uint32_t rgb, const char *title, const char *detail)
 {
@@ -333,17 +282,37 @@ void raiseAlert(int pc, AlertKind kind, uint32_t rgb, const char *title, const c
   strlcpy(alert.detail, detail, sizeof(alert.detail));
   nowHHMM(alert.at);
   alert.shownAt = millis();
+  alert.offPending = false;
   if (kind == AK_CALL)
-    PLAY(SND_CALL);
+    ringCall();
   else
-    PLAY(SND_ALERT);
+    soundPlay(SND_ALERT);
 }
 
-// 正常に戻ったら、その PC のアラートを閉じる
+// 正常に戻ったら、その PC のアラートを閉じる。呼び出しは CALL_HOLD_MS たつまで閉じない (callUpdate で閉じる)
 void retractAlert(int pc, AlertKind kind)
 {
-  if (alert.active && alert.pc == pc && alert.kind == kind)
+  if (!alert.active || alert.pc != pc || alert.kind != kind)
+    return;
+  if (kind == AK_CALL)
+    alert.offPending = true;
+  else
     alert.active = false;
+}
+
+// 呼び出しの間: 5 秒ごとに鳴らし直し、20 秒たって OFF が来ていれば閉じる (OFF がまだなら来るまで出したまま、音は止める)
+void callUpdate()
+{
+  if (!alert.active || alert.kind != AK_CALL)
+    return;
+  if (millis() - alert.shownAt >= CALL_HOLD_MS)
+  {
+    if (alert.offPending)
+      alert.active = false;
+    return;
+  }
+  if (millis() - alert.rangAt >= CALL_REPEAT_MS)
+    ringCall();
 }
 
 // ---- 画面下に数秒だけ出す通知 ----
@@ -386,7 +355,7 @@ void jobDone(int i, int el)
   addEvent(i, C_GREEN, "JOB DONE %s", dur);
   snprintf(msg, sizeof(msg), "%s JOB DONE %s", pc.name, dur);
   toast(pc.rgb, msg);
-  PLAY(SND_DONE);
+  soundPlay(SND_DONE);
 }
 
 void handleStatus(int i, const byte *payload, unsigned int length)
@@ -1267,9 +1236,10 @@ void drawDevice()
       {"HEAP", String(ESP.getFreeHeap() / 1024) + "K"},
       {"PSRAM", String(ESP.getFreePsram() / 1024) + "K"},
       {"CPU", String(ESP.getCpuFreqMHz()) + "MHZ"},
+      {"BOARD", BOARD_NAME},
       {"BUILD", __DATE__},
   };
-  for (int r = 0; r < 5; r++)
+  for (int r = 0; r < 6; r++)
   {
     text(14, 144 + r * 12, 1, C_DIM, sys[r].label);
     textR(150, 144 + r * 12, 1, C_TEXT, sys[r].value.c_str());
@@ -1279,23 +1249,26 @@ void drawDevice()
   const char *help[][2] = {
       {"SW1", "NEXT PAGE"},
       {"SW2", "PREV PAGE"},
+#if TFT_BL >= 0
       {"SW1 HOLD", "BRIGHTNESS"},
+#endif
       {"SW2 HOLD", "VOLUME"},
   };
-  for (int r = 0; r < 4; r++)
+  for (int r = 0; r < (int)(sizeof(help) / sizeof(help[0])); r++)
   {
     text(170, 144 + r * 12, 1, C_CYAN, help[r][0]);
     textR(306, 144 + r * 12, 1, C_TEXT, help[r][1]);
   }
-  // 押している間だけ光る (配線の確認用)
-  const Button *sws[] = {&sw1, &sw2, &sw3, &sw4};
+  // 押している間だけ光る (配線の確認用)。その機種にないスイッチは出さない
   for (int k = 0; k < 4; k++)
   {
+    if (SWS[k]->pin < 0)
+      continue;
     char name[4] = {'S', 'W', (char)('1' + k), 0};
-    text(170 + k * 34, 192, 1, sws[k]->down ? C_GREEN : C_DIM, name);
+    text(170 + k * 34, 192, 1, SWS[k]->down ? C_GREEN : C_DIM, name);
   }
   text(170, 204, 1, C_DIM, "LIGHT");
-  textR(306, 204, 1, C_TEXT, BL_NAMES[blLevel]);
+  textR(306, 204, 1, TFT_BL >= 0 ? C_TEXT : C_DIM, TFT_BL >= 0 ? BL_NAMES[blLevel] : "FIXED");
   text(170, 216, 1, C_DIM, "SOUND");
   textR(306, 216, 1, muted() ? C_RED : C_GREEN, VOL_NAMES[volLevel]);
 }
@@ -1320,11 +1293,12 @@ void drawAlert()
   textC(SCREEN_W / 2, y + h - 14, 1, C_DIM, "PRESS ANY SWITCH");
 }
 
+// 画面の一番上 (上の帯の上) に重ねる
 void drawToast()
 {
-  int y = 212, h = 24;
+  int y = 0, h = 24;
   cv->fillRect(0, y, SCREEN_W, h, c565(C_PANEL));
-  cv->drawFastHLine(0, y, SCREEN_W, c565(toastRgb));
+  cv->drawFastHLine(0, y + h - 1, SCREEN_W, c565(toastRgb));
   cv->fillRect(0, y, 4, h, c565(toastRgb));
   text(12, y + 8, 1, C_TEXT, toastMsg);
 }
@@ -1404,7 +1378,7 @@ void handleButtons()
     if (e1 == EV_SHORT || e2 == EV_SHORT || e3 == EV_SHORT || e4 == EV_SHORT)
     {
       alert.active = false;
-      PLAY(SND_CLICK);
+      soundPlay(SND_CLICK);
     }
     return;
   }
@@ -1413,31 +1387,28 @@ void handleButtons()
   if (e2 == EV_SHORT)
     page = (page + PG_N - 1) % PG_N;
   if (e1 == EV_SHORT || e2 == EV_SHORT)
-    PLAY(SND_CLICK);
+    soundPlay(SND_CLICK);
   if (e1 == EV_LONG && page == PG_GRAY)
   {
     fillMode = (fillMode + 1) % FILL_N;
     fillChangedAt = millis();
-    PLAY(SND_CLICK);
+    soundPlay(SND_CLICK);
   }
+#if TFT_BL >= 0
   else if (e1 == EV_LONG)
   {
     blLevel = (blLevel + 1) % (sizeof(BL_LEVELS) / sizeof(BL_LEVELS[0]));
     applyBacklight();
     toast(C_CYAN, (String("BRIGHTNESS ") + BL_NAMES[blLevel]).c_str());
-    PLAY(SND_CLICK);
+    soundPlay(SND_CLICK);
   }
+#endif
   if (e2 == EV_LONG)
   {
-    volLevel = (volLevel + 1) % (sizeof(VOL_DUTY) / sizeof(VOL_DUTY[0]));
+    volLevel = (volLevel + 1) % VOL_N;
+    soundSetVolume(volLevel); // OFF にしたら鳴っている音も止まる
     toast(muted() ? C_RED : C_GREEN, (String("SOUND ") + VOL_NAMES[volLevel]).c_str());
-    if (muted())
-    {
-      ledcWrite(BZ_CH, 0);
-      seq = nullptr;
-    }
-    else
-      PLAY(SND_VOL); // 新しい音量で試し鳴らし
+    soundPlay(SND_VOL); // 新しい音量で試し鳴らし (OFF なら鳴らない)
   }
   // SW3・SW4 はまだ役割がないので、押されたことだけ知らせる
   BtnEv ex[] = {e3, e4};
@@ -1448,7 +1419,7 @@ void handleButtons()
       snprintf(msg, sizeof(msg), "SW%d %s (NOT ASSIGNED)", 3 + k, ex[k] == EV_LONG ? "HOLD" : "PRESS");
       Serial.printf("sw%d: %s\n", 3 + k, ex[k] == EV_LONG ? "hold" : "press");
       toast(C_DIM, msg);
-      PLAY(SND_CLICK);
+      soundPlay(SND_CLICK);
     }
 }
 
@@ -1493,21 +1464,22 @@ void setup()
 {
   Serial.begin(115200);
   delay(200);
-  Serial.printf("psram: %s, size %u\n", psramFound() ? "found" : "NOT FOUND", ESP.getPsramSize());
+  Serial.printf("board: %s, psram: %s, size %u\n", BOARD_NAME, psramFound() ? "found" : "NOT FOUND", ESP.getPsramSize());
 
-  ledcSetup(BZ_CH, 2000, 10);
-  ledcAttachPin(BUZZER_PIN, BZ_CH);
-  ledcWrite(BZ_CH, 0);
+  soundBegin();
+  soundSetVolume(volLevel);
+#if TFT_BL >= 0
   ledcSetup(BL_CH, 5000, 8);
   ledcAttachPin(TFT_BL, BL_CH);
   applyBacklight();
+#endif
   if (!cv->begin(40000000))
     Serial.println("canvas begin failed!");
 
-  pinMode(SW1_PIN, INPUT_PULLUP);
-  pinMode(SW2_PIN, INPUT_PULLUP);
-  pinMode(SW3_PIN, INPUT_PULLUP);
-  pinMode(SW4_PIN, INPUT_PULLUP);
+  // スイッチは液晶のあとで設定する (GPIO13 は SPI2 の MISO の決まったピンなので、先にするとプルアップが外れることがある)
+  for (Button *b : SWS)
+    if (b->pin >= 0)
+      pinMode(b->pin, INPUT_PULLUP);
 
   for (PcInfo &pc : pcs)
     pcReset(pc);
@@ -1550,7 +1522,7 @@ void setup()
     sw1.down = sw1.raw = sw1.longFired = true;
 
   addEvent(-1, C_CYAN, "BOOT");
-  PLAY(SND_BOOT);
+  soundPlay(SND_BOOT);
   Serial.printf("heap: free %u, psram free %u\n", ESP.getFreeHeap(), ESP.getFreePsram());
 }
 
@@ -1561,6 +1533,7 @@ void loop()
   handleButtons();
   soundUpdate();
   tick();
+  callUpdate();
 
   static uint32_t lastSample = 0;
   if (millis() - lastSample >= HIST_MS)
